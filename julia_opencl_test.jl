@@ -1,13 +1,11 @@
+using GLMakie: ColorTypes
 using Base: iscontiguous, allocatedinline
 using LinearAlgebra, OpenCL
-using Plots
+using GLMakie
 using Distributions
 using BenchmarkTools
 
-HACER_PLOT_DE_INFECTADOS = false
-GRAFICAR_AGENTES = true
-
-# defino un struct vector en vez de usar uno externo
+# defino un struct Vec2 en vez de usar uno externo
 # porque quiero tener control sobre la coherencia de los
 # bits con el struct de la gpu
 struct Vec2
@@ -15,6 +13,8 @@ struct Vec2
   y::Float32
 end
 
+# Esto se debe poder reducir mas, peor por ahora deberia
+# ser suficiente
 struct Agent
   pos::Vec2
   vecl::Vec2
@@ -23,17 +23,20 @@ struct Agent
   iterations_spent_infected::UInt32
 end
 
+# Tres estados en los que se puede encontrar un agente,
+# convertido a variable por claridad
 NO_INFECTADO = 0
 INFECTADO = 1
 RECUPERADO = 2
 
-n = 10_000; # number of agents
-borders = Array{Float32, 1}(undef, 2)
-borders[1] = 500.
-borders[2] = 500.
-# sizeOfCuadrant = 10.
+n = 10_000; # numero de agentes en la iteracion
+num_iterations = 200
+borders = Array{Float32, 1}(undef, 2) # bordes de la simulacion
+borders[1] = 100.
+borders[2] = 100.
 
-agents = Array{Agent, 1}(undef, n)
+# Nuestra lista de agentes es para cada punto de la iteracion
+agents = Array{Agent, 1}(undef, n * num_iterations)
 
 # Inicializar los valores de los agentes
 for i in 1:n
@@ -42,70 +45,76 @@ for i in 1:n
   positions[1] = positions[1] * borders[1]
   positions[2] = positions[2] * borders[2]
 
-  if i < 10 
+  # decidir cuantos agentes empiezan infectados
+  if i < 10
     agents[i] = Agent(Vec2(positions[1], positions[2]), Vec2(vels[1], vels[2]), INFECTADO, 0, 0)
   else
     agents[i] = Agent(Vec2(positions[1], positions[2]), Vec2(vels[1], vels[2]), NO_INFECTADO, 0, 0)
   end
 end
 
+# Cargar el codigo y crear el contexto de OpenCL
 kernel = read("./agents.cl", String)
 device, ctx, queue = cl.create_compute_context()
 p = cl.Program(ctx, source=kernel) |> cl.build!
 
-agent_buff = cl.Buffer(Agent, ctx, (:r, :copy), hostbuf=agents)
-
-update_agents_function =    cl.Kernel(p, "update_agent")
+# Hacer link con las funciones del codigo de OpenCL
+update_agents_function = cl.Kernel(p, "update_agent")
 count_infected_agents_function = cl.Kernel(p, "count_infected_agents")
 
-num_iterations = 500
+# Crear buffers en la memoria de la gpu y copiar los contenidos
+# de nuestros arrays
+agent_buff = cl.Buffer(Agent, ctx, (:r, :copy), hostbuf=agents)
+
 infected_per_iteration = Array{UInt32, 1}(undef, num_iterations)
 fill!(infected_per_iteration, 0)
 infectedCount_buff = cl.Buffer(UInt32, ctx, (:r, :copy), hostbuf=infected_per_iteration)
 
-if HACER_PLOT_DE_INFECTADOS
-  print("Iniciando iteraciones\n")
-  @time for i in 1:num_iterations
-    queue(update_agents_function,    size(agents), nothing, agent_buff, convert(UInt32, n), convert(UInt32, i), borders[1], borders[2])
-    queue(count_infected_agents_function, size(agents), nothing, agent_buff, infectedCount_buff, convert(UInt32, i))
-  end
+print("Iniciando iteraciones\n")
+@time for i in 1:num_iterations
+  queue(update_agents_function, n, nothing, agent_buff, convert(UInt32, n), convert(UInt32, i), borders[1], borders[2])
 end
 
-f = cl.read(queue, infectedCount_buff)
-for i in 1:num_iterations
-  infected_per_iteration[i] = f[i]
-  print.(infected_per_iteration[i], " ")
-end
+# Leer la lista de agentes una vez que ya calculamos
+# todas las iteraciones
+agentes_procesado = cl.read(queue, agent_buff)
 
-if GRAFICAR_AGENTES
-  # Cosas para graficar las posiciones de los agentes
-  anim = @time @animate for i in 1:num_iterations
-    queue(update_agents_function, size(agents), nothing, agent_buff, convert(UInt32, n), convert(UInt32, i))
+# Una vez que tenemos estos agentes podemos hacer lo que queramos con ellos
+# lo siguiente es solo una manera de graficarlos y guardar esa grafica
 
-    r = cl.read(queue, agent_buff)
+# creo los observables que cambiaran
+# en cada frame
+points = Observable(Point2[(0.0, 0.0)])
+c =      Observable([RGBf0(0, 0, 0)])
 
-    xs =     Array{Float32, 1}(undef, n)
-    ys =     Array{Float32, 1}(undef, n)
-    colors = Array{Symbol,  1}(undef, n)
+fig, ax = scatter(points, color=c, markersize = 5)
+limits!(ax, 0, borders[1], 0, borders[2])
 
-    for i in eachindex(r)
-      xs[i] = r[i].pos.x
-      ys[i] = r[i].pos.y
+print("No cerrar la ventana hasta que se terminen de proceas los datos\n")
+record(fig, "append_animation.mp4", 1:num_iterations; framerate =  30) do i
+  # como estamos leyendo una lista muy larga con muchas iteraciones
+  # necesitamos un indice inicial por iteracion
+  b = (i - 1) * n
 
-      if r[i].state == 1
-        colors[i] = :red
-      elseif r[i].state == 0
-        colors[i] = :blue
-      elseif r[i].state == 2
-        colors[i] = :green
-      end
+  new_points = Array{Point2,         1}(undef, n)
+  new_colors = Array{ColorTypes.RGB, 1}(undef, n)
 
+  for agent in 1:n
+    # guardar las posiciones de los agentes
+    new_points[agent] = Point2(agentes_procesado[b + agent].pos.x, agentes_procesado[b + agent].pos.y)
+
+    # decidir el color que vamos a dibujar en base a sus estados
+    if agentes_procesado[b + agent].state == INFECTADO
+      new_colors[agent] = RGBf0(1, 0, 0)
+    elseif agentes_procesado[b + agent].state == NO_INFECTADO
+      new_colors[agent] = RGBf0(0, 1, 0)
+    elseif agentes_procesado[b + agent].state == RECUPERADO
+      new_colors[agent] = RGBf0(0, 0, 1)
     end
-
-    scatter(xs, ys, lab="", xlim=(-10, 110), ylim=(-10, 110), mc=colors)
   end
 
-  gif(anim, "./gaming_time.gif", fps=60)
+  points[] = new_points
+  c[]      = new_colors
 end
 
-plot(0:num_iterations - 1, infected_per_iteration, label="infectados")
+print("Puede cerrar la ventana")
