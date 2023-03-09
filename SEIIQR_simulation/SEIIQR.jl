@@ -38,15 +38,15 @@ INFECTADO_SINTOMATICO = 2
 RECUPERADO = 3
 EN_CUARENTENA = 4
 
-n = 50_000; # numero de agentes en la iteracion
-num_iterations = 125
+n = 100_000; # numero de agentes en la iteracion
+num_iterations = 250
 borders = Array{Float32, 1}(undef, 2) # bordes de la simulacion
-borders[1] = 250
-borders[2] = 250
-size_of_cuadrant::UInt32 = 1
+borders[1] = 750
+borders[2] = 750
+size_of_cuadrant::UInt32 = 10
 initial_infected = 1_250
 
-kernel = read("./agents.cl", String)
+kernel = read("./SEIIQR.cl", String)
 device, ctx, queue = cl.create_compute_context()
 p = cl.Program(ctx, source=kernel) |> cl.build!
 
@@ -110,7 +110,10 @@ function main()
   @time for i in 1:(num_iterations - 1)
     simInfo = SimulationInfo(n, i, size_of_cuadrant, Vec2(borders[1], borders[2]))
     # Clean up all the necessary buffers on the GPU
-    queue(clear_buffer,                       amount_of_cuadrants, nothing, cuadrants_filled_buff)
+    queue(clear_buffer, n,                   nothing, cuadrants_buff)
+    queue(clear_buffer, amount_of_cuadrants, nothing, cuadrants_filled_buff)
+    queue(clear_buffer, amount_of_cuadrants, nothing, cuadrants_counter_buff)
+    queue(clear_buffer, amount_of_cuadrants, nothing, cuadrants_semaphores_buff)
 
     queue(update_filled_cuadrants,            n, nothing, agent_buff, cuadrants_buff, cuadrants_filled_buff, simInfo)
     queue(calcular_posiciones_de_cuadriculas, 1, nothing, cuadrants_filled_buff, amount_of_cuadrants)
@@ -183,7 +186,7 @@ function load_and_render()
   # lines!(  ax2, infected; color=:red, linewidth=4)
 
   print("No cerrar la ventana hasta que se terminen de procesar los datos\n")
-  record(fig, "append_animation.gif", 1:num_iterations; framerate =  30) do i
+  record(fig, "Infected_Agents.gif", 1:num_iterations; framerate =  30) do i
     # como estamos leyendo una lista muy larga con muchas iteraciones
     # necesitamos un indice inicial por iteracion
     if i % 10 == 0
