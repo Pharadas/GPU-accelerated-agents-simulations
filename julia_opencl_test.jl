@@ -23,6 +23,13 @@ struct Agent
   counter::UInt8
 end
 
+struct SimulationInfo
+  amountOfAgents::UInt32
+  iteration::UInt32
+  sizeOfSector::UInt32
+  borders::Vec2
+end
+
 # Tres estados en los que se puede encontrar un agente,
 # convertido a variable por claridad
 SUSCEPTIBLE = 0
@@ -31,12 +38,13 @@ INFECTADO_SINTOMATICO = 2
 RECUPERADO = 3
 EN_CUARENTENA = 4
 
-n = 20_000; # numero de agentes en la iteracion
-num_iterations = 250
+n = 50_000; # numero de agentes en la iteracion
+num_iterations = 125
 borders = Array{Float32, 1}(undef, 2) # bordes de la simulacion
-borders[1] = 100
-borders[2] = 100
-size_of_cuadrant::UInt32 = 2
+borders[1] = 250
+borders[2] = 250
+size_of_cuadrant::UInt32 = 1
+initial_infected = 1_250
 
 kernel = read("./agents.cl", String)
 device, ctx, queue = cl.create_compute_context()
@@ -51,11 +59,12 @@ calcular_posiciones_de_cuadriculas = cl.Kernel(p, "calcular_posiciones_de_cuadri
 
 function main()
   GLMakie.set_window_config!(framerate = Inf, vsync = false)
+  simInfo = SimulationInfo(n, 0, size_of_cuadrant, Vec2(borders[1], borders[2]))
 
   amount_of_cuadrants::UInt32 = trunc(UInt32, (((borders[1]) / size_of_cuadrant) + 2) * (((borders[2]) / size_of_cuadrant) + 2))
 
   # Nuestra lista de agentes es para cada punto de la iteracion
-  agents               = Array{Agent,  1}(undef, n * num_iterations)
+  agents               = Array{Agent , 1}(undef, n * num_iterations)
   cuadrants            = Array{UInt32, 1}(undef, n)
   cuadrants_filled     = Array{UInt32, 1}(undef, amount_of_cuadrants)
   cuadrants_counter    = Array{UInt32, 1}(undef, amount_of_cuadrants)
@@ -79,7 +88,7 @@ function main()
     positions[2] = positions[2] * borders[2]
 
     # decidir cuantos agentes empiezan infectados
-    if i < 10
+    if i < initial_infected
       # agents[i] = Agent(Vec2(positions[1], positions[2]), Vec2(vels[1], vels[2]), INFECTADO, 0, 0)
       agents[i] = Agent(Vec2(positions[1], positions[2]), Vec2(vels[1], vels[2]), INFECTADO_ASINTOMATICO, 0)
       # agents[i] = Agent(Vec2(positions[1], positions[2]), Vec2(0., 0.), INFECTADO, 0)
@@ -99,17 +108,24 @@ function main()
 
   print("Running simulation\n")
   @time for i in 1:(num_iterations - 1)
+    simInfo = SimulationInfo(n, i, size_of_cuadrant, Vec2(borders[1], borders[2]))
     # Clean up all the necessary buffers on the GPU
-    queue(clear_buffer,                       n, nothing, cuadrants_buff)
     queue(clear_buffer,                       amount_of_cuadrants, nothing, cuadrants_filled_buff)
-    queue(clear_buffer,                       amount_of_cuadrants, nothing, cuadrants_counter_buff)
-    queue(clear_buffer,                       amount_of_cuadrants, nothing, cuadrants_semaphores_buff)
 
-    queue(update_filled_cuadrants,            n, nothing, agent_buff, cuadrants_buff, cuadrants_filled_buff, convert(UInt32, i), convert(UInt32, n), convert(UInt32, size_of_cuadrant), borders[1], borders[2])
+    queue(update_filled_cuadrants,            n, nothing, agent_buff, cuadrants_buff, cuadrants_filled_buff, simInfo)
     queue(calcular_posiciones_de_cuadriculas, 1, nothing, cuadrants_filled_buff, amount_of_cuadrants)
-    queue(assign_agents_to_cuadrants,         n, nothing, agent_buff, cuadrants_buff, cuadrants_filled_buff, cuadrants_counter_buff, cuadrants_semaphores_buff, convert(UInt32, n), convert(UInt32, i), size_of_cuadrant, borders[1], borders[2])
+    queue(assign_agents_to_cuadrants,         n, nothing, agent_buff, cuadrants_buff, cuadrants_filled_buff, cuadrants_counter_buff, cuadrants_semaphores_buff, simInfo)
 
-    queue(update_agents_function,             n, nothing, agent_buff, cuadrants_buff, cuadrants_filled_buff, convert(UInt32, n), convert(UInt32, i), convert(UInt32, size_of_cuadrant), convert(UInt32, amount_of_cuadrants), borders[1], borders[2])
+    queue(update_agents_function,
+          n,
+          nothing,
+          agent_buff,
+          cuadrants_buff,
+          cuadrants_filled_buff,
+          simInfo,
+          convert(UInt32, amount_of_cuadrants),
+      )
+
     # print(i, "\r")
   end
 
@@ -143,21 +159,45 @@ function load_and_render()
   # Una vez que tenemos estos agentes podemos hacer lo que queramos con ellos
   # lo siguiente es solo una manera de graficarlos y guardar esa grafica
   print("Starting rendering\n")
-  points = Observable(Point2[(0.0, 0.0)])
-  c      = Observable([:black])
+  points        = Observable(Point2[(0.0, 0.0)])
+  c             = Observable([:black])
 
-  fig, ax = scatter(points, color=c, markersize = 4)
-  limits!(ax, 0, borders[1], 0, borders[2])
+  fig = Figure()
+
+  ax1 = Axis(fig[1, 1],
+      title = "Simulation",
+      xlabel = "The x label",
+      ylabel = "The y label"
+  )
+
+  ax2 = Axis(fig[1, 2],
+      title = "Infected",
+      xlabel = "The x label",
+      ylabel = "The y label"
+  )
+
+  limits!(ax1, 0, borders[1], 0, borders[2])
+  limits!(ax2, 0, num_iterations, 0, n)
+
+  scatter!(ax1, points, color=c, markersize = 2)
+  # lines!(  ax2, infected; color=:red, linewidth=4)
 
   print("No cerrar la ventana hasta que se terminen de procesar los datos\n")
-  record(fig, "append_animation.gif", 1:num_iterations; framerate =  60) do i
+  record(fig, "append_animation.gif", 1:num_iterations; framerate =  30) do i
     # como estamos leyendo una lista muy larga con muchas iteraciones
     # necesitamos un indice inicial por iteracion
-    print("processing iteration #", i, "\r")
+    if i % 10 == 0
+      print("processing iteration #", i, "\r")
+    end
     b = (i - 1) * n
 
     new_points = Array{Point2, 1}(undef, n)
     new_colors = Array{Symbol, 1}(undef, n)
+    susceptible = 0
+    infectado_sintomatico = 0
+    infectado_asintomatico = 0
+    recuperado = 0
+    cuarentena = 0
 
     for agent in 1:n
       # guardar las posiciones de los agentes
@@ -166,23 +206,41 @@ function load_and_render()
       # decidir el color que vamos a dibujar en base a sus estados
       if agentes_procesado[b + agent].state == SUSCEPTIBLE
         new_colors[agent] = :green
+        susceptible += 1
 
       elseif agentes_procesado[b + agent].state == INFECTADO_SINTOMATICO
         new_colors[agent] = :purple
+        infectado_sintomatico += 1
 
       elseif agentes_procesado[b + agent].state == INFECTADO_ASINTOMATICO
         new_colors[agent] = :red
+        infectado_asintomatico += 1
 
       elseif agentes_procesado[b + agent].state == RECUPERADO
         new_colors[agent] = :blue
+        recuperado += 1
 
       elseif agentes_procesado[b + agent].state == EN_CUARENTENA
         new_colors[agent] = :yellow
+        cuarentena += 1
       end
     end
 
-    points[] = new_points
-    c[]      = new_colors
+    points[]        = new_points
+    c[]             = new_colors
+
+    scatter!(ax2, [i], [susceptible]; color=:green, markersize=2)
+    scatter!(ax2, [i], [infectado_sintomatico]; color=:purple, markersize=2)
+    scatter!(ax2, [i], [infectado_asintomatico]; color=:red, markersize=2)
+    scatter!(ax2, [i], [recuperado]; color=:blue, markersize=2)
+    scatter!(ax2, [i], [cuarentena]; color=:yellow, markersize=2)
+
+    # lines!(ax2, iter_num, infected_count; color=:red, linewidth=4)
+
+    # push!(infected[], Point2(convert(Float64, i), convert(Float64, infected_count)))
+
+    # append!(infected[], infected_count)
+    # append!(iteration_num[], i)
   end
 
   print("Puede cerrar la ventana")
