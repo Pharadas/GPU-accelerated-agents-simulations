@@ -1,0 +1,7 @@
+numero_de_agentes: 20000
+numero_de_iteraciones: 100
+bordes:
+  - 1000
+  - 1000
+tamano_de_division_de_seccion: 2
+infectados_iniciales: 1250

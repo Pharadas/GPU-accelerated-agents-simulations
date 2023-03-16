@@ -5,6 +5,8 @@ using GLMakie
 using Distributions
 using BenchmarkTools
 using JLD2
+using YAML
+using ProgressBars
 
 # defino un struct Vec2 en vez de usar uno externo
 # porque quiero tener control sobre la coherencia de los
@@ -30,6 +32,12 @@ struct SimulationInfo
   borders::Vec2
 end
 
+data = YAML.load_file("simulation_data.yml")
+
+for i in data
+  println(i.first, " => ", i.second)
+end
+
 # Tres estados en los que se puede encontrar un agente,
 # convertido a variable por claridad
 SUSCEPTIBLE = 0
@@ -38,24 +46,24 @@ INFECTADO_SINTOMATICO = 2
 RECUPERADO = 3
 EN_CUARENTENA = 4
 
-n = 100_000; # numero de agentes en la iteracion
-num_iterations = 250
-borders = Array{Float32, 1}(undef, 2) # bordes de la simulacion
-borders[1] = 750
-borders[2] = 750
-size_of_cuadrant::UInt32 = 10
-initial_infected = 1_250
+n = data["numero_de_agentes"] # numero de agentes en la iteracion
+num_iterations = data["numero_de_iteraciones"]
+borders = Array{Float32, 1}(data["bordes"]) # bordes de la simulacion
+size_of_cuadrant::UInt32 = data["tamano_de_division_de_seccion"]
+initial_infected = data["infectados_iniciales"]
 
 kernel = read("./SEIIQR.cl", String)
 device, ctx, queue = cl.create_compute_context()
 p = cl.Program(ctx, source=kernel) |> cl.build!
 
 # Hacer link con las funciones del codigo de OpenCL
-update_agents_function             = cl.Kernel(p, "update_agent")
-clear_buffer                       = cl.Kernel(p, "clear_buffer")
-update_filled_cuadrants            = cl.Kernel(p, "update_filled_cuadrants")
-assign_agents_to_cuadrants         = cl.Kernel(p, "assign_agents_to_cuadrants")
-calcular_posiciones_de_cuadriculas = cl.Kernel(p, "calcular_posiciones_de_cuadriculas")
+update_agents_function                           = cl.Kernel(p, "update_agent")
+clear_buffer                                     = cl.Kernel(p, "clear_buffer")
+update_filled_cuadrants                          = cl.Kernel(p, "update_filled_cuadrants")
+assign_agents_to_cuadrants                       = cl.Kernel(p, "assign_agents_to_cuadrants")
+calcular_posiciones_de_cuadriculas               = cl.Kernel(p, "calcular_posiciones_de_cuadriculas")
+two_pass_consecutive_vector_addition_first_pass  = cl.Kernel(p, "two_pass_consecutive_vector_addition_first_pass")
+two_pass_consecutive_vector_addition_second_pass = cl.Kernel(p, "two_pass_consecutive_vector_addition_second_pass")
 
 function main()
   GLMakie.set_window_config!(framerate = Inf, vsync = false)
@@ -77,7 +85,6 @@ function main()
   fill!(agents, Agent(Vec2(0., 0.), Vec2(0., 0.), SUSCEPTIBLE, 0))
 
   # print("\ntotal bytes sent to gpu: ", (sizeof(agents) + sizeof(cuadrants) + sizeof(cuadrants_filled) + sizeof(cuadrants_counter) + sizeof(cuadrants_semaphores)), "\n")
-  print("total megabytes sent to gpu: ", (sizeof(agents) + sizeof(cuadrants) + sizeof(cuadrants_filled) + sizeof(cuadrants_counter) + sizeof(cuadrants_semaphores)) / 1_000_000, "\n")
   print("Creating data for ", n, " agents during ", num_iterations, " iterations\n")
 
   # Inicializar los valores de los agentes
@@ -107,7 +114,7 @@ function main()
   cuadrants_semaphores_buff = cl.Buffer(UInt32, ctx, (:r, :copy), hostbuf=cuadrants_semaphores)
 
   print("Running simulation\n")
-  @time for i in 1:(num_iterations - 1)
+  @time for i in ProgressBar(1:(num_iterations - 1))
     simInfo = SimulationInfo(n, i, size_of_cuadrant, Vec2(borders[1], borders[2]))
     # Clean up all the necessary buffers on the GPU
     queue(clear_buffer, n,                   nothing, cuadrants_buff)
@@ -186,12 +193,9 @@ function load_and_render()
   # lines!(  ax2, infected; color=:red, linewidth=4)
 
   print("No cerrar la ventana hasta que se terminen de procesar los datos\n")
-  record(fig, "Infected_Agents.gif", 1:num_iterations; framerate =  30) do i
+  record(fig, "Infected_Agents.gif", ProgressBar(1:num_iterations); framerate =  30) do i
     # como estamos leyendo una lista muy larga con muchas iteraciones
     # necesitamos un indice inicial por iteracion
-    if i % 10 == 0
-      print("processing iteration #", i, "\r")
-    end
     b = (i - 1) * n
 
     new_points = Array{Point2, 1}(undef, n)
@@ -247,4 +251,23 @@ function load_and_render()
   end
 
   print("Puede cerrar la ventana")
+end
+
+t::UInt32 = trunc(UInt32, (((borders[1]) / size_of_cuadrant) + 2) * (((borders[2]) / size_of_cuadrant) + 2))
+
+print("Estos son los parametros de la simulacion, se enviaran ", ((sizeof(Agent) * n * (num_iterations + 1)) + (t * sizeof(UInt32) * 3)) / 1_000_000, " megabytes a la gpu, continuar? y/n\n> ")
+if (readline() == "y")
+  println()
+  main()
+  print("\nQuiere graficar los resultados? y/n\n> ")
+  if (readline() == "y")
+    println()
+    load_and_render()
+  end
+
+else
+  print("Quiere graficar los resultados guardados? y/n\n> ")
+  if (readline() == "y")
+    load_and_render()
+  end
 end
