@@ -1,0 +1,7 @@
+name = "AgentsGPU"
+uuid = "efd7eab4-06aa-4f34-bf16-62cd8f756060"
+authors = ["pharadas <davidsudo18@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+OpenCL = "08131aa3-fb12-5dee-8b74-c09406e224a2"
